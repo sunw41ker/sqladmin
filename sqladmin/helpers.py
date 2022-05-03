@@ -1,5 +1,33 @@
+from typing import ClassVar, Type, Union, Set
+from enum import Enum
 import re
-from typing import Union
+from typing import Any, Dict, Iterable, List, Optional, OrderedDict, Set, Union
+from urllib.parse import urlencode, quote_plus, parse_qs, parse_qsl
+from warnings import filters
+from sqlalchemy import inspect as base_sa_inspect
+# import urllib
+from sqladmin.backends import BackendEnum, get_used_backend
+from pydantic import BaseModel
+
+used_backend: BackendEnum = get_used_backend()
+
+if used_backend == BackendEnum.GINO:
+    from sqladmin.backends.gino.models import GinoResultList
+
+    def sa_inspect(obj, *args, **kwargs):
+        if isinstance(obj, list):
+            if len(obj) > 0:
+                return base_sa_inspect(obj[0], *args, **kwargs)
+        if isinstance(obj, GinoResultList):
+            if len(obj) > 0:
+                return base_sa_inspect(obj[0], *args, **kwargs)
+            else:
+                return base_sa_inspect(obj.class_, *args, **kwargs)
+        return base_sa_inspect(obj, *args, **kwargs)
+elif used_backend in (BackendEnum.SA_13, BackendEnum.SA_14,):
+    sa_inspect = base_sa_inspect
+else:
+    raise ImportError("Undefined backend: {}".format(used_backend))
 
 
 def as_str(s: Union[str, bytes]) -> str:

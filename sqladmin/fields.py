@@ -4,11 +4,12 @@ import operator
 import time
 from typing import Any, Callable, Generator, List, Optional, Tuple, Union
 
-from sqlalchemy import inspect
 from wtforms import Form, ValidationError, fields, widgets
 
 from sqladmin import widgets as sqladmin_widgets
-from sqladmin.helpers import as_str
+from sqladmin.helpers import as_str, sa_inspect as inspect
+
+
 
 __all__ = [
     "DateField",
@@ -281,7 +282,8 @@ class QuerySelectField(fields.SelectFieldBase):
     `blank_text` parameter.
     """
 
-    widget = widgets.Select()
+    # widget = widgets.Select()
+    widget = sqladmin_widgets.Select2Widget()
 
     def __init__(
         self,
@@ -362,7 +364,8 @@ class QuerySelectMultipleField(QuerySelectField):
     found in the query, this will result in a validation error.
     """
 
-    widget = widgets.Select(multiple=True)
+    # widget = widgets.Select(multiple=True)
+    widget = sqladmin_widgets.Select2Widget(multiple=True)
 
     def __init__(
         self,

@@ -1,43 +1,82 @@
 from typing import Any
 
 import pytest
-from sqlalchemy import Column, ForeignKey, Integer, String, create_engine
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy import Column, ForeignKey, Integer, String
+
 from sqlalchemy.orm import relationship, sessionmaker
 from starlette.applications import Starlette
+from sqlalchemy.dialects.postgresql import UUID
 
 from sqladmin import Admin, ModelAdmin
 from sqladmin.exceptions import InvalidColumnError, InvalidModelError
-from tests.common import TEST_DATABASE_URI_SYNC
+from tests.common import used_backend, BackendEnum
 
-Base = declarative_base()  # type: Any
-
-engine = create_engine(
-    TEST_DATABASE_URI_SYNC, connect_args={"check_same_thread": False}
-)
-
-LocalSession = sessionmaker(bind=engine)
-
-app = Starlette()
-admin = Admin(app=app, engine=engine)
+from tests.backends.model import getMixinMetable, getMixinSurrogatePK
 
 
-class User(Base):
-    __tablename__ = "users"
+if used_backend == BackendEnum.GINO:
+    from gino.ext.starlette import Gino  # type: ignore
+    from tests.backends.gino import BaseModel, metadata as sa_gino
+    sa_metadata = sa_gino
+    
+    model_base_classes = (
+        BaseModel, 
+        getMixinMetable(sa_engine=sa_metadata, default_options={'namespace': 'models'}), 
+        getMixinSurrogatePK(sa_engine=sa_metadata), 
+    )
+    
+elif used_backend in (BackendEnum.SA_13, BackendEnum.SA_14):
+    from sqlalchemy.ext.declarative import declarative_base
+    from tests.common import TEST_DATABASE_URI_SYNC
+    from sqlalchemy import create_engine
 
-    id = Column(Integer, primary_key=True)
+    BaseModel = declarative_base()  # type: Any
+
+    engine = create_engine(
+        TEST_DATABASE_URI_SYNC, connect_args={"check_same_thread": False}
+    )
+
+    LocalSession = sessionmaker(bind=engine)
+    
+    sa_metadata = engine
+
+
+    model_base_classes = (
+        BaseModel, 
+        getMixinMetable(sa_engine=sa_metadata), 
+        getMixinSurrogatePK(sa_engine=sa_metadata)
+    )
+        
+# app = Starlette()
+# admin = Admin(app=app, engine=engine)
+
+
+class User(*model_base_classes):
+    # __tablename__ = "users"
+
+    # id = Column(Integer, primary_key=True)
     name = Column(String)
 
     addresses = relationship("Address", back_populates="user")
 
 
-class Address(Base):
-    __tablename__ = "addresses"
+class Address(*model_base_classes):
+    # __tablename__ = "addresses"
 
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
+    # id = Column(Integer, primary_key=True)
+    # user_id = Column(Integer, ForeignKey("user__model.id"))
 
-    user = relationship("User", back_populates="addresses")
+    # user = relationship("User", back_populates="addresses")
+
+    user: Any = relationship(
+        User,
+        back_populates='addresses',
+        uselist=False,
+    )
+    user_id = sa_gino.Column(
+        Integer,
+        sa_gino.ForeignKey(User.id, ondelete="cascade"),
+    )
 
 
 def test_model_setup() -> None:
@@ -86,7 +125,8 @@ def test_column_list_default() -> None:
     class UserAdmin(ModelAdmin, model=User):
         pass
 
-    assert UserAdmin().get_list_columns() == [("id", User.id)]
+    admin_columns = UserAdmin().get_list_columns()
+    assert admin_columns == [("id", User.id)]
 
 
 def test_column_list_by_model_columns() -> None:

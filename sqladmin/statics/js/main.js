@@ -18,3 +18,29 @@ $(document).on('click','#modal-delete-button',function() {
     }
   });
 });
+
+console.log('Forms query select', document.querySelector('form.list-filter-form'));
+
+$('form.list-filter-form').on('formdata', (e)=> {
+  console.log('!!!! onformdata()')
+  const formData = e.originalEvent.formData; 
+  console.log('Event formData =', formData);
+  let ordering = formData.get('o')
+  
+  const op = formData.get('operand');
+  if (op !== undefined && op !== null && op !== ''){
+    formData.append(formData.get('full_clause'), op);
+  }
+  for (key of ['full_clause', 'operand', 'is_active']){
+    formData.delete(key)
+  }
+});
+
+$('form.list-filter-form').on('submit', (e)=> {
+  const form = e.target; 
+  console.log('!!!! onSubmit()')
+  console.log('onSubmit() form=', form);
+  const data = Object.fromEntries(new FormData(form).entries());
+  console.log('data=',data);
+  // return true;
+});

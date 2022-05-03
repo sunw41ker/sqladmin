@@ -2,9 +2,7 @@ from datetime import date, datetime
 from typing import Any, Generator
 
 import pytest
-from sqlalchemy import Column, Integer, String, create_engine
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy import Column, Integer, String
 from wtforms import Form
 
 from sqladmin.fields import (
@@ -17,31 +15,58 @@ from sqladmin.fields import (
     Select2TagsField,
     TimeField,
 )
-from tests.common import TEST_DATABASE_URI_SYNC, DummyData
-
-Base = declarative_base()  # type: Any
-
-engine = create_engine(
-    TEST_DATABASE_URI_SYNC, connect_args={"check_same_thread": False}
-)
-
-LocalSession = sessionmaker(bind=engine)
-
-session: Session = LocalSession()
+from tests.common import DummyData
+from tests.backends import BackendEnum, used_backend
+from tests.backends.model import getMixinMetable, getMixinSurrogatePK
 
 
-class User(Base):
-    __tablename__ = "users"
+if used_backend == BackendEnum.GINO:
+    from sqladmin.backends.gino.models import GinoEngine
+    from sqlalchemy.ext.hybrid import hybrid_property
 
-    id = Column(Integer, primary_key=True)
+    from gino.ext.starlette import Gino  # type: ignore
+    from tests.backends.gino import BaseModel, metadata as sa_gino
+    from tests.backends.model import getMixinMetable, getMixinSurrogatePK
+    from tests.settings import Settings
+
+    base_classes = (
+        BaseModel,
+        getMixinMetable(sa_engine=sa_gino, default_options={'namespace': 'fields'}), 
+        getMixinSurrogatePK(sa_engine=sa_gino),
+    )
+
+elif used_backend in (BackendEnum.SA_13, BackendEnum.SA_14):
+    from sqlalchemy.ext.declarative import declarative_base
+    from sqlalchemy.orm import Session, sessionmaker
+    from sqlalchemy import create_engine
+    from tests.common import TEST_DATABASE_URI_SYNC
+    
+    BaseModel = declarative_base()  # type: Any
+    engine = create_engine(
+        TEST_DATABASE_URI_SYNC, connect_args={"check_same_thread": False}
+    )
+    LocalSession = sessionmaker(bind=engine)
+    session: Session = LocalSession()
+
+    base_classes = (
+        BaseModel,
+        getMixinMetable(sa_engine=engine, default_options={'namespace': 'fields'}), 
+        getMixinSurrogatePK(sa_engine=engine)
+    )
+
+class User(*base_classes):
+    # __tablename__ = "users"
+
+    # id = Column(Integer, primary_key=True)
     name = Column(String)
 
 
-@pytest.fixture(autouse=True, scope="function")
-def prepare_database() -> Generator[None, None, None]:
-    Base.metadata.create_all(engine)
-    yield
-    Base.metadata.drop_all(engine)
+if used_backend in (BackendEnum.SA_13, BackendEnum.SA_14):
+    @pytest.fixture(autouse=True, scope="function")
+    def prepare_database() -> Generator[None, None, None]:
+        BaseModel.metadata.create_all(engine)
+        yield
+        BaseModel.metadata.drop_all(engine)
 
 
 def test_date_field() -> None:

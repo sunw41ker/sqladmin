@@ -1,6 +1,8 @@
 *.egg-info
 *.pyc
+dist/
 .env
+.vscode/
 venv/
 __pycache__/
 htmlcov/
@@ -9,3 +11,4 @@ htmlcov/
 .mypy_cache/
 coverage.xml
 examples/
+test.db

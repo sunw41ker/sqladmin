@@ -1,0 +1,23 @@
+Metadata-Version: 2.1
+Name: sqladmin
+Version: 0.1.4
+Summary: Admin interface for SQLAlchemy and Gino
+License: BSD
+Author: Amin Alaee
+Author-email: mohammadamin.alaee@gmail.com
+Requires-Python: >=3.7,<4.0
+Classifier: License :: Other/Proprietary License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.7
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Requires-Dist: Jinja2
+Requires-Dist: aiosqlite (>=0.17.0,<0.18.0)
+Requires-Dist: pydantic[mypy] (>=1.8.2,<2.0.0)
+Requires-Dist: python-multipart (>=0.0.5,<0.0.6)
+Requires-Dist: reform (>=0.2,<0.3)
+Requires-Dist: sqlalchemy (==1.3.15)
+Requires-Dist: starlette
+Requires-Dist: wtforms (>=3,<4)
+Requires-Dist: wtforms-appengine (>=0.1,<0.2)

@@ -1,9 +1,26 @@
+from pyexpat import model
+from sqladmin.backends.gino.models import prepare_gino_model_data, process_gino_model_post_create
+from sqladmin.filters import ModelAdminParamsMixin
+from sqladmin.pagination import Pagination
+from sqladmin.helpers import prettify_class_name, sa_inspect, slugify_class_name
+from sqladmin.forms import get_model_form
+from sqladmin.exceptions import InvalidColumnError, InvalidModelError
+from wtforms import Form
+from starlette.requests import Request
+from sqlalchemy import Column, and_, all_
+# from sqlalchemy.sql.elements import Cast
+from sqlalchemy.sql.elements import ClauseElement, Cast
+from sqlalchemy.orm.attributes import InstrumentedAttribute
+from tokenize import group
 from typing import (
     Any,
     ClassVar,
     Dict,
     List,
+    Optional,
+    OrderedDict,
     Sequence,
+    Set,
     Tuple,
     Type,
     Union,
@@ -12,27 +29,40 @@ from typing import (
 
 import anyio
 from sqlalchemy import Column, func, inspect, select
+import sqlalchemy as sa
 from sqlalchemy.engine.base import Engine
 from sqlalchemy.exc import NoInspectionAvailable
-from sqlalchemy.ext.asyncio import AsyncEngine
+
 from sqlalchemy.orm import (
     ColumnProperty,
     RelationshipProperty,
     selectinload,
     sessionmaker,
 )
-from sqlalchemy.orm.attributes import InstrumentedAttribute
-from sqlalchemy.sql.elements import ClauseElement
-from starlette.requests import Request
-from wtforms import Form
+from sqlalchemy.ext.hybrid import hybrid_property
+from sqlalchemy.engine.result import RowProxy
+from collections.abc import Mapping as PythonMapping
+from sqladmin import backends
+from sqladmin.backends import BackendEnum, get_used_backend
+from pydantic import BaseModel
 
-from sqladmin.exceptions import InvalidColumnError, InvalidModelError
-from sqladmin.forms import get_model_form
-from sqladmin.helpers import prettify_class_name, slugify_class_name
-from sqladmin.pagination import Pagination
+used_backend: BackendEnum = get_used_backend()
+
+if used_backend == BackendEnum.GINO:
+    from sqladmin.backends.gino.models import Gino
+    EngineType = ClassVar[Gino]
+    from sqladmin.backends.gino.models import get_related_property_gino_loader
+    from sqladmin.backends.gino.models import RelationshipProperty as GinoRelationshipProperty
+    from gino.declarative import ModelType as GinoModelType
+elif used_backend in (BackendEnum.SA_13, BackendEnum.SA_14):
+    from sqlalchemy.ext.asyncio import AsyncEngine  # type: ignore
+    EngineType = ClassVar[Union[Engine, AsyncEngine]]
+
 
 __all__ = [
     "ModelAdmin",
+    "BaseRelationshipsLoader",
+    "BaseModelRelationshipsLoader"
 ]
 
 
@@ -52,24 +82,25 @@ class ModelAdminMeta(type):
         if not model:
             return cls
 
-        try:
-            mapper = inspect(model)
-        except NoInspectionAvailable:
-            raise InvalidModelError(
-                f"Class {model.__name__} is not a SQLAlchemy model."
-            )
+        mapper = mcls._get_model_mapper(model)
 
-        assert len(mapper.primary_key) == 1, "Multiple PK columns not supported."
+        pk_columns = list(mapper.primary_key)
 
-        cls.pk_column = mapper.primary_key[0]
-        cls.identity = slugify_class_name(model.__name__)
+        if not kwargs.get("first_of_multiple", False):
+            assert len(pk_columns) == 1, "Multiple PK columns not supported."
+
+        cls.pk_column = pk_columns[0]
+
+        cls.identity = attrs.get(
+            "identity", slugify_class_name(model.__name__))
         cls.model = model
 
         cls.name = attrs.get("name", prettify_class_name(cls.model.__name__))
         cls.name_plural = attrs.get("name_plural", f"{cls.name}s")
         cls.icon = attrs.get("icon")
 
-        mcls._check_conflicting_options(["column_list", "column_exclude_list"], attrs)
+        mcls._check_conflicting_options(
+            ["column_list", "column_exclude_list"], attrs)
         mcls._check_conflicting_options(
             ["column_details_list", "column_details_exclude_list"], attrs
         )
@@ -80,6 +111,15 @@ class ModelAdminMeta(type):
     def _check_conflicting_options(mcls, keys: List[str], attrs: dict) -> None:
         if all(k in attrs for k in keys):
             raise AssertionError(f"Cannot use {' and '.join(keys)} together.")
+
+    @classmethod
+    def _get_model_mapper(mcls, model):
+        try:
+            return inspect(model)
+        except NoInspectionAvailable:
+            raise InvalidModelError(
+                f"Class {model.__name__} is not a SQLAlchemy model."
+            )
 
 
 class BaseModelAdmin:
@@ -100,7 +140,18 @@ class BaseModelAdmin:
         return True
 
 
-class ModelAdmin(BaseModelAdmin, metaclass=ModelAdminMeta):
+def getattrwalk(root, path=[], default=None):
+    if not path:
+        return root
+    current, *rest_path = path
+    current_root = getattr(root, current, default=default)
+    if rest_path:
+        return walk(current_root, rest_path, default=default)
+    else:
+        return current_root
+
+
+class ModelAdmin(BaseModelAdmin, ModelAdminParamsMixin, metaclass=ModelAdminMeta):
     """Base class for defining admnistrative behaviour for the model.
 
     ???+ usage
@@ -115,12 +166,14 @@ class ModelAdmin(BaseModelAdmin, metaclass=ModelAdminMeta):
     """
 
     model: ClassVar[type]
+    # schema: ClassVar[BaseModel]
 
     # Internals
     pk_column: ClassVar[Column]
     identity: ClassVar[str]
     sessionmaker: ClassVar[sessionmaker]
-    engine: ClassVar[Union[Engine, AsyncEngine]]
+    engine: EngineType
+    backend: BackendEnum
     async_engine: ClassVar[bool]
 
     # Metadata
@@ -175,7 +228,8 @@ class ModelAdmin(BaseModelAdmin, metaclass=ModelAdminMeta):
         ```
     """
 
-    column_exclude_list: ClassVar[Sequence[Union[str, InstrumentedAttribute]]] = []
+    column_exclude_list: ClassVar[Sequence[Union[str,
+                                                 InstrumentedAttribute]]] = []
     """List of columns to exclude in `List` page.
     Columns can either be string names or SQLAlchemy columns.
 
@@ -209,7 +263,8 @@ class ModelAdmin(BaseModelAdmin, metaclass=ModelAdminMeta):
     """
 
     # Details page
-    column_details_list: ClassVar[Sequence[Union[str, InstrumentedAttribute]]] = []
+    column_details_list: ClassVar[Sequence[Union[str,
+                                                 InstrumentedAttribute]]] = []
     """List of columns to display in `Detail` page.
     Columns can either be string names or SQLAlchemy columns.
 
@@ -261,17 +316,22 @@ class ModelAdmin(BaseModelAdmin, metaclass=ModelAdminMeta):
     """Edit view template. Default is `edit.html`."""
 
     def _run_query_sync(self, stmt: ClauseElement) -> Any:
+        if self.backend == BackendEnum.GINO:
+            raise Exception('Cant use Gino syncronously')
         with self.sessionmaker(expire_on_commit=False) as session:
             result = session.execute(stmt)
             return result.scalars().all()
 
     async def _run_query(self, stmt: ClauseElement) -> Any:
-        if self.async_engine:
-            async with self.sessionmaker(expire_on_commit=False) as session:
-                result = await session.execute(stmt)
-                return result.scalars().all()
-        else:
-            return await anyio.to_thread.run_sync(self._run_query_sync, stmt)
+        if self.backend == BackendEnum.GINO:
+            return await self.model.__metadata__.all(stmt)
+        if self.backend in (BackendEnum.SA_14, BackendEnum.SA_13):
+            if self.async_engine:
+                async with self.sessionmaker(expire_on_commit=False) as session:
+                    result = await session.execute(stmt)
+                    return result.scalars().all()
+            else:
+                return await anyio.to_thread.run_sync(self._run_query_sync, stmt)
 
     def _add_object_sync(self, obj: Any) -> None:
         with self.sessionmaker.begin() as session:
@@ -294,24 +354,73 @@ class ModelAdmin(BaseModelAdmin, metaclass=ModelAdminMeta):
                 setattr(result, name, value)
 
     async def count(self) -> int:
-        stmt = select(func.count(self.pk_column))
-        rows = await self._run_query(stmt)
-        return rows[0]
+        # @todo: fix statement generation for count function
+        # try to use get_list_statement()
+        if self.backend == BackendEnum.GINO:
+            ids = await self.model.select(self.pk_column.name).gino.all()
+            return len(ids)
+        elif self.backend in (BackendEnum.SA_14, BackendEnum.SA_13):
+            stmt = select(func.count(self.pk_column))
+            rows = await self._run_query(stmt)
+            return rows[0]
+    
+    def _get_select_model_extra_columns(self, select_model: Any):
+        if not isinstance(select_model, (list, tuple, )):
+            select_model = [select_model]
+            
+        for m in select_model:
+            for key in dir(m):
+                ecol = getattr(m, key, None) 
+                if isinstance(ecol, (Cast, )):
+                    yield ecol, key
+    
+    def get_list_statement(self, *, select_model, order_by, page_size, page, where=None):
+        if not isinstance(select_model, (list, tuple, )):
+            select_model = [select_model]
+        select_full = [*select_model]
+        for ecol, key in self._get_select_model_extra_columns(select_model):
+            select_full.append(ecol.label(key))
+        stmt = select(select_full)
+        where = [w for w in ([where] + (self.get_list_params_where() or [])) if w is not None]
+        if len(where) > 1:
+            stmt = stmt.where(and_(*where))
+        elif len(where) == 1:
+            stmt = stmt.where(where[0])
+        order_by = self.get_list_params_order_by() or order_by
+        stmt = stmt.order_by(*order_by).limit(page_size).offset((page - 1) * page_size)
+        return stmt
 
-    async def list(self, page: int, page_size: int) -> Pagination:
-        page_size = min(page_size or self.page_size, max(self.page_size_options))
+    def get_query_order_by(self, *args, **kwargs):
+        return [self.pk_column]
+    
+    def get_query_where(self, *args, **kwargs):
+        return None
+    
+    def get_query_select(self, *args, **kwargs):
+        return self.model
+
+    async def list(self, page: int, page_size: int, **kwargs) -> Pagination:
+        page_size = min(page_size or self.page_size,
+                        max(self.page_size_options))
 
         count = await self.count()
-        stmt = (
-            select(self.model)
-            .order_by(self.pk_column)
-            .limit(page_size)
-            .offset((page - 1) * page_size)
+        stmt = self.get_list_statement(
+            select_model=self.get_query_select(**kwargs.get('select', {})), 
+            order_by = self.get_query_order_by(**kwargs.get('order_by', {})), 
+            page_size=page_size, page=page, 
+            where=self.get_query_where(**kwargs.get('where', {}))
         )
+        # Artist.query.add_columns(slugify(Artist.Name).label("name_slug"))
 
-        for _, attr in self.get_list_columns():
-            if isinstance(attr, RelationshipProperty):
-                stmt = stmt.options(selectinload(attr.key))
+        if used_backend == BackendEnum.GINO:
+            for label, attr in self.get_list_columns():
+                if isinstance(attr, RelationshipProperty):
+                    loader = self._get_related_gino_loader(attr)
+                    stmt = stmt.execution_options(loader=loader)
+        elif used_backend in (BackendEnum.SA_13, BackendEnum.SA_14, ):
+            for _, attr in self.get_list_columns():
+                if isinstance(attr, RelationshipProperty):
+                    stmt = stmt.options(selectinload(self.get_key(attr)))
 
         rows = await self._run_query(stmt)
         pagination = Pagination(
@@ -323,50 +432,170 @@ class ModelAdmin(BaseModelAdmin, metaclass=ModelAdminMeta):
 
         return pagination
 
-    async def get_model_by_pk(self, value: Any) -> Any:
-        stmt = select(self.model).where(self.pk_column == value)
+    def _try_cast_pk(self, pk):
+        try:
+            if not isinstance(pk, self.pk_column.type.python_type):
+                pk = self.pk_column.type.python_type(pk)
+        except NotImplementedError:
+            pass
+        return pk
 
-        for _, attr in self.get_details_columns():
-            if isinstance(attr, RelationshipProperty):
-                stmt = stmt.options(selectinload(attr.key))
+    def _get_related_gino_loader(self, attr):
+        return get_related_property_gino_loader(self.model, self.pk_column, self.get_key(attr, obj=self.model), attr)
+
+    def get_model_pk_select_statement(self, select_model, pk_column, pk_column_value):
+        return select(select_model).where(pk_column == pk_column_value)
+
+    async def get_edit_context(self, base_context, **kwargs) -> dict:
+        return base_context
+    
+    async def get_model_by_pk(self, value: Any) -> Any:
+        # cast value to column pk_column type
+        try:
+            if not isinstance(value, self.pk_column.type.python_type):
+                value = self.pk_column.type.python_type(value)
+        except NotImplementedError:
+            pass
+        stmt = self.get_model_pk_select_statement(
+            self.model, self.pk_column, value)
+
+        if used_backend == BackendEnum.GINO:
+            for label, attr in self.get_details_columns():
+                if isinstance(attr, RelationshipProperty):
+                    loader = self._get_related_gino_loader(attr)
+                    stmt = stmt.execution_options(loader=loader)
+        elif used_backend in (BackendEnum.SA_13, BackendEnum.SA_14, ):
+            for _, attr in self.get_details_columns():
+                if isinstance(attr, RelationshipProperty):
+                    stmt = stmt.options(selectinload(self.get_key(attr)))
 
         rows = await self._run_query(stmt)
         if rows:
             return rows[0]
         return None
 
+    def get_key(self, attr: Union[Column, ColumnProperty, RelationshipProperty], obj: Optional[type] = None, default: Any = None):
+        if isinstance(attr, Column):
+            return attr.name
+        elif isinstance(attr, ColumnProperty):
+            return attr.columns[0].name
+        else:
+            try:
+                if hasattr(attr, 'key'):
+                    key = attr.key
+                elif obj is not None:
+                    key = self.get_attr_key_by_obj(obj, attr)
+                else:
+                    return default
+            except AttributeError:
+                return default
+            return key
+
+    def get_attr_key_by_obj(self, obj: type, attr: Union[Column, ColumnProperty, RelationshipProperty]):
+        for ikey, iattr in obj.__dict__.items():
+            if iattr == attr:
+                return ikey
+        raise AttributeError(f'Object {obj} dont have attribute {attr}')
+
     def get_attr_value(
-        self, obj: type, attr: Union[Column, ColumnProperty, RelationshipProperty]
+        self, obj: type, attr: Union[Column, ColumnProperty, RelationshipProperty],
+        placeholder_not_implemented: str = "Not implemented",
+        placeholder_none: str = "None"
     ) -> Any:
         if isinstance(attr, Column):
             return getattr(obj, attr.name)
+        elif isinstance(attr, ColumnProperty):
+            return getattr(obj, attr.columns[0].name)
+        elif isinstance(attr, str):
+            *path, key = attr.split('.')
+            if len(path) == 1 and hasattr(obj, key):
+                return getattr(obj, key, None) 
+            model, *path = path
+            
+            try:
+                return getattrwalk(obj, [*path, key])
+            except AttributeError:
+                return None
+            mapper = sa_inspect(model)
+            model_class = mapper.class_
+            attr = getattr(model_class, key)
+            
+            return getattr(obj, key, None)
         else:
-            value = getattr(obj, attr.key)
+            try:
+                if hasattr(attr, 'key'):
+                    key = attr.key
+                else:
+                    key = self.get_attr_key_by_obj(obj, attr)
+            except AttributeError:
+                return None
+
+            # remove this!
+            try:
+                if isinstance(obj, RowProxy):
+                    value = getattr(obj, key, placeholder_none)
+                elif isinstance(attr, (RelationshipProperty, )):
+                    value = getattr(obj, key, placeholder_none)
+                else:
+                    value = getattr(obj, key, placeholder_none)
+
+            except NotImplementedError:
+                value = placeholder_not_implemented
+
             if isinstance(value, list):
                 return ", ".join(map(str, value))
             return value
 
     def get_model_attr(
-        self, attr: Union[str, InstrumentedAttribute]
+        self, attr: Union[str, InstrumentedAttribute, Column, RelationshipProperty]
     ) -> Union[ColumnProperty, RelationshipProperty]:
-        assert isinstance(attr, (str, InstrumentedAttribute))
+        assert isinstance(attr, (str, InstrumentedAttribute, RelationshipProperty,
+                          Column, property, hybrid_property))
 
         if isinstance(attr, str):
             key = attr
-        elif isinstance(attr.prop, ColumnProperty):
+        elif isinstance(attr, Column):
             key = attr.name
-        elif isinstance(attr.prop, RelationshipProperty):
+        # elif isinstance(attr, RelationshipProperty):
+        #     # if hasattr(attr, 'parent'):
+        #     #     attr.set_parent()
+        #     key = attr.name
+        elif isinstance(attr, (property, RelationshipProperty)):
+            model_attr_match = [
+                a
+                for a in dir(self.model)
+                if hasattr(self.model, a) and getattr(self.model, a) == attr
+            ]
+            key = model_attr_match[0]
+            if not hasattr(attr, 'key') or attr.key is None:
+                attr.key = key
+        elif hasattr(attr, 'prop') and isinstance(attr.prop, ColumnProperty):
+            key = attr.name
+        elif hasattr(attr, 'prop') and isinstance(attr.prop, (RelationshipProperty, )):
             key = attr.prop.key
-
         try:
-            return inspect(self.model).attrs[key]
+            insp = inspect(self.model)
+            hasattr(insp, 'attrs')  # DO NOT REMOVE
+            insp.attrs
+            return insp.attrs[key]
         except KeyError:
+            try:
+                attr = str(attr)
+            except AttributeError as e:
+                # raise e
+                attr = '*attr*'
             raise InvalidColumnError(
                 f"Model '{self.model.__name__}' has no attribute '{attr}'."
             )
 
     def get_model_attributes(self) -> List[Column]:
-        return list(inspect(self.model).attrs)
+        attrs = inspect(self.model).attrs
+        if isinstance(attrs, OrderedDict):
+            return list(attrs.values())
+        if attrs is None:
+            print()
+            return list()
+        return list(attrs)
 
     def get_list_columns(self) -> List[Tuple[str, Column]]:
         """Get list of columns to display in List page."""
@@ -383,16 +612,23 @@ class ModelAdmin(BaseModelAdmin, metaclass=ModelAdminMeta):
             all_attrs = self.get_model_attributes()
             attrs = list(set(all_attrs) - set(exclude_columns))
         else:
-            attrs = [getattr(self.model, self.pk_column.name).prop]
+            pk_attr = getattr(self.model, self.pk_column.name)
+            if hasattr(pk_attr, 'prop'):
+                attrs = [pk_attr.prop]
+            else:
+                attrs = [pk_attr]
 
         labels = self.get_column_labels()
-        return [(labels.get(attr, attr.key), attr) for attr in attrs]
+        return [(labels.get(attr, self.get_key(attr)), attr) for attr in attrs]
+    
+    # def get_list_filters
 
     def get_details_columns(self) -> List[Tuple[str, Column]]:
         """Get list of columns to display in Detail page."""
 
         column_details_list = getattr(self, "column_details_list", None)
-        column_details_exclude_list = getattr(self, "column_details_exclude_list", None)
+        column_details_exclude_list = getattr(
+            self, "column_details_exclude_list", None)
 
         if column_details_list:
             attrs = [self.get_model_attr(attr) for attr in column_details_list]
@@ -406,7 +642,17 @@ class ModelAdmin(BaseModelAdmin, metaclass=ModelAdminMeta):
             attrs = self.get_model_attributes()
 
         labels = self.get_column_labels()
-        return [(labels.get(attr, attr.key), attr) for attr in attrs]
+
+        lst = []
+
+        for attr in attrs:
+            default = self.get_key(attr, default='key_not_found')
+            # default = getattr(attr, 'key', 'key_not_found')
+            keyname = labels.get(attr, default)
+            lst.append((keyname, attr, ))
+
+        return lst
+        # return [(labels.get(attr, getattr(attr, 'key', 'key_not_found')), attr) for attr in attrs]
 
     def get_column_labels(self) -> Dict[Column, str]:
         return {
@@ -415,37 +661,91 @@ class ModelAdmin(BaseModelAdmin, metaclass=ModelAdminMeta):
         }
 
     async def delete_model(self, obj: Any) -> None:
-        if self.async_engine:
-            async with self.sessionmaker.begin() as session:
-                await session.delete(obj)
-        else:
-            await anyio.to_thread.run_sync(self._delete_object_sync, obj)
+        if self.backend == BackendEnum.GINO:
+            if hasattr(obj, 'id'):  # TODO: remove this!
+                pk = obj.id
+            else:
+                pk = obj.user_id
+            pk = self._try_cast_pk(obj.id)
+            await self.model.delete.where(
+                self.pk_column == pk).gino.status()
+        elif self.backend in (BackendEnum.SA_13, BackendEnum.SA_14, ):
+            if self.async_engine:
+                async with self.sessionmaker.begin() as session:
+                    await session.delete(obj)
+            else:
+                await anyio.to_thread.run_sync(self._delete_object_sync, obj)
 
-    async def insert_model(self, obj: type) -> Any:
-        if self.async_engine:
-            async with self.sessionmaker.begin() as session:
-                session.add(obj)
-        else:
-            await anyio.to_thread.run_sync(self._add_object_sync, obj)
+    async def init_model_instance(self, data):
+        if used_backend == BackendEnum.GINO:
+            data, non_cols_data = await prepare_gino_model_data(self.model, data)
+        model = self.model(**data)
+        model._post_create_model_data = non_cols_data
+        return model
+
+    async def insert_model(self, obj: type, obj_extra: Optional[Dict] = None) -> Any:
+        if self.backend == BackendEnum.GINO:
+            if getattr(obj.__class__, '__class__', None) == GinoModelType:
+                await obj.create()
+                post_create_data = getattr(
+                    obj, '_post_create_model_data', None)
+                if post_create_data:
+                    await process_gino_model_post_create(instance=obj, data=post_create_data)
+            else:
+                if not isinstance(obj, PythonMapping):
+                    obj: dict = obj.to_dict()
+                    obj.pop(self.pk_column.key, None)
+                await self.model.create(**obj)
+        elif self.backend in (BackendEnum.SA_13, BackendEnum.SA_14, ):
+            if self.async_engine:
+                async with self.sessionmaker.begin() as session:
+                    session.add(obj)
+            else:
+                await anyio.to_thread.run_sync(self._add_object_sync, obj)
 
     async def update_model(self, pk: Any, data: Dict[str, Any]) -> None:
-        if self.async_engine:
-            stmt = select(self.model).where(self.pk_column == pk)
-            relationships = inspect(self.model).relationships
+        if self.backend == BackendEnum.GINO:
+            data, non_cols_data = await prepare_gino_model_data(self.model, data)
+            data = self.model(**data).to_dict()
+            _data = {}
+            for k, v in data.items():
+                if v is None:
+                    continue
+                if k == self.pk_column.key:
+                    continue
+                if isinstance(v, str):
+                    if v.isnumeric():
+                        v = int(v)
+                _data[k] = v
+            data = _data
+            pk = self._try_cast_pk(pk)
+            if hasattr(self, 'pydantic_schema'):
+                # schema.parse_obj()
+                data = self.pydantic_schema(**data).dict()
+            else:
+                # model_data = self.model(**data).to_dict()
+                pass
+            await self.model.update.values(**data).where(
+                self.pk_column == pk).gino.status()
+            await process_gino_model_post_create(data=non_cols_data, instance_id=pk, Model=self.model)
+        elif self.backend in (BackendEnum.SA_13, BackendEnum.SA_14, ):
+            if self.async_engine:
+                stmt = select(self.model).where(self.pk_column == pk)
+                relationships = inspect(self.model).relationships
 
-            for name in relationships.keys():
-                stmt = stmt.options(selectinload(name))
+                for name in relationships.keys():
+                    stmt = stmt.options(selectinload(name))
 
-            async with self.sessionmaker.begin() as session:
-                result = await session.execute(stmt)
-                result = result.scalars().first()
-                for name, value in data.items():
-                    if name in relationships and isinstance(value, list):
-                        # Load relationship objects into session
-                        session.add_all(value)
-                    setattr(result, name, value)
-        else:
-            await anyio.to_thread.run_sync(self._update_modeL_sync, pk, data)
+                async with self.sessionmaker.begin() as session:
+                    result = await session.execute(stmt)
+                    result = result.scalars().first()
+                    for name, value in data.items():
+                        if name in relationships and isinstance(value, list):
+                            # Load relationship objects into session
+                            session.add_all(value)
+                        setattr(result, name, value)
+            else:
+                await anyio.to_thread.run_sync(self._update_modeL_sync, pk, data)
 
     async def scaffold_form(self) -> Type[Form]:
-        return await get_model_form(model=self.model, engine=self.engine)
+        return await get_model_form(model=self.model, engine=self.engine, backend=self.backend)
