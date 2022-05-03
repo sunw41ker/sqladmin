@@ -29,7 +29,8 @@ package_data = \
 install_requires = \
 ['Jinja2',
  'aiosqlite>=0.17.0,<0.18.0',
- 'pydantic[mypy]>=1.8.2,<2.0.0',
+ 'mypy==0.931',
+ 'pydantic>=1.8.2,<2.0.0',
  'python-multipart>=0.0.5,<0.0.6',
  'reform>=0.2,<0.3',
  'sqlalchemy==1.3.15',

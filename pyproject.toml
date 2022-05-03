@@ -14,7 +14,8 @@ wtforms = "^3"
 wtforms-appengine = "^0.1"
 python-multipart = "^0.0.5"
 aiosqlite = "^0.17.0"
-pydantic = {extras = ["mypy"], version = "^1.8.2"}
+mypy = "0.931"
+pydantic = {version = "^1.8.2"}
 reform = "^0.2"
 
 [tool.poetry.dev-dependencies]

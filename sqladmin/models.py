@@ -1,4 +1,3 @@
-from pyexpat import model
 from sqladmin.backends.gino.models import prepare_gino_model_data, process_gino_model_post_create
 from sqladmin.filters import ModelAdminParamsMixin
 from sqladmin.pagination import Pagination
@@ -11,7 +10,6 @@ from sqlalchemy import Column, and_, all_
 # from sqlalchemy.sql.elements import Cast
 from sqlalchemy.sql.elements import ClauseElement, Cast
 from sqlalchemy.orm.attributes import InstrumentedAttribute
-from tokenize import group
 from typing import (
     Any,
     ClassVar,
