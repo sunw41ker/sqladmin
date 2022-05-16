@@ -204,7 +204,8 @@ class Admin(BaseAdminView):
             title: Admin title.
             logo_url: URL of logo to be displayed instead of title.
         """
-        app_state = app.state 
+        # app_state = app.state 
+        root_app = app
         assert isinstance(engine, EngineTypeTuple)
         super().__init__(
             app=app, engine=engine, base_url=base_url, title=title, logo_url=logo_url,
@@ -259,8 +260,9 @@ class Admin(BaseAdminView):
         #     tags=[APP_NAME],
         # )
         # app.include_router(view_router)
-        self.app.state.root = app_state
+        admin.state.root = self.app.state
         self.app.mount(base_url, app=admin, name="admin")
+        # self.app.state
         
 
     async def index(self, request: Request) -> Response:
@@ -399,7 +401,8 @@ class Admin(BaseAdminView):
             context["form"] = await self._prepare_endpoint_form(context["form"], self.edit.__name__, request)
             return self.templates.TemplateResponse(model_admin.edit_template, context)
 
-        form = Form(await request.form())
+        starlette_form = await request.form()
+        form = Form(starlette_form)
         if not form.validate():
             context["form"] = await self._prepare_endpoint_form(context["form"], self.edit.__name__, request)
             return self.templates.TemplateResponse(
@@ -408,7 +411,13 @@ class Admin(BaseAdminView):
                 status_code=400,
             )
 
-        await model_admin.update_model(pk=request.path_params["pk"], data=form.data)
+        data = await model_admin.prepare_update_data(
+            pk=request.path_params["pk"], 
+            data=form.data, 
+            starlette_form=starlette_form,
+            request=request,
+        )
+        await model_admin.update_model(pk=request.path_params["pk"], data=data)
     
         return RedirectResponse(
             request.url_for("admin:list", identity=identity),

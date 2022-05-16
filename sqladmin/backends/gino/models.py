@@ -1,6 +1,7 @@
 from functools import lru_cache
 from gino.crud import CRUDModel
 from gino.declarative import Model, ModelType, ColumnAttribute, declarative_base, inspect_model_type
+from sqlalchemy import ForeignKey, ForeignKeyConstraint
 from gino.ext.starlette import Gino, GinoEngine  # type: ignore
 from sqlalchemy.orm.attributes import InstrumentedAttribute
 from sqlalchemy.ext.hybrid import hybrid_property
@@ -49,7 +50,6 @@ NO_ATTR = None
 RELATIONSHIP_PROPERTY_ID_KEY_TPL = '{}_id'
 MAPPER_KEY = 'mapper'
 GINO_MAPPER_KEY = '_gino_mapper'
-
 
 
 
@@ -240,10 +240,10 @@ class GinoModelMapperAdapter:
         # prop.do_init()
         
 
-        # related_model_prop_pk_key = '{}_id'.format(val.key)
+        # related_model_prop_fk_key = '{}_id'.format(val.key)
         # RelatedModel = get_related_model(val)
-        # if not hasattr(RelatedModel, related_model_prop_pk_key):
-        #     related_model_prop_pk_key = None
+        # if not hasattr(RelatedModel, related_model_prop_fk_key):
+        #     related_model_prop_fk_key = None
 
         # # init direction of relation
         # direction = getattr(val, 'direction', None)
@@ -251,7 +251,7 @@ class GinoModelMapperAdapter:
         # #     return direction
         # if direction is not None:
         #     if val.secondary is None:
-        #         if related_model_prop_pk_key is None:
+        #         if related_model_prop_fk_key is None:
         #             if val.uselist is not None:
         #                 print()
         #             if val.uselist:
@@ -581,7 +581,7 @@ def get_secondary_model_fk(Model, SecondaryModel, default=None):
     return getattr(SecondaryModel, key, default)
 
 
-def get_model_pk(class_, *, single=True, raise_on_multiple=False):
+def get_model_pk(class_, *, single=True, raise_on_multiple=False, matching_col:Optional[Column]=None, matching_model:Optional[GinoModelType]=None):
     try:
         mapper = inspect(class_)
     except NoInspectionAvailable:
@@ -590,13 +590,27 @@ def get_model_pk(class_, *, single=True, raise_on_multiple=False):
         )
 
     pk_columns = list(mapper.primary_key)
+    
+    if pk_columns:
+        if single:
+            if len(pk_columns) > 0:
+                if raise_on_multiple:
+                    assert len(pk_columns) > 1, "Multiple PK columns not supported."
+            return pk_columns[0]
+        return pk_columns
 
-    if single:
-        if len(pk_columns) > 0:
-            if raise_on_multiple:
-                assert len(pk_columns) > 1, "Multiple PK columns not supported."
-        return pk_columns[0]
-    return pk_columns
+    fk_constraints = [c for c in mapper.local_table.constraints if isinstance(c, ForeignKeyConstraint)]
+    if matching_col is not None:
+        reffered_table = matching_col.table
+    elif matching_model is not None:
+        reffered_table = matching_model.__table__
+    else:
+        return None
+    for fk_c in fk_constraints:
+        if fk_c.referred_table == reffered_table:
+            return list(fk_c.columns)[0]
+
+    return None 
 
 
 def get_one2many_query(
@@ -655,7 +669,7 @@ def get_relationship_direction(
     Args:
         model (GinoModelType): _description_
         model_prop (RelationshipProperty): _description_
-
+        @TODO: improve
     Returns:
         _type_: _description_
     """
@@ -670,27 +684,33 @@ def get_relationship_direction(
     if model_prop.backref is not None:
         back_populates = back_populates or model_prop.backref[0]
         uselist = (model_prop.backref[1] or {}).get('uselist', None)
-    RelatedModel = get_related_model(model_prop)
-    related_model_prop_pk_key = RELATIONSHIP_PROPERTY_ID_KEY_TPL.format(back_populates)
+    RelatedModel = get_related_model(model_prop) 
+    # for rfk in RelatedModel.__table__.foreign_keys:
+    #     if rfk.column.table == model.__table__:
+    #         related_model_prop_fk = rfk.column
+    #         break
+    # else:
+    #     related_model_prop_fk = None
+    related_model_prop_fk_key = RELATIONSHIP_PROPERTY_ID_KEY_TPL.format(back_populates)
     
     # model_prop.secondaryjoin
     if model_prop.secondary is None:
         if (
             (hasattr(model, model_prop.key) 
              and hasattr(model, model_prop_pk_key) 
-             and not hasattr(RelatedModel, related_model_prop_pk_key)) 
+             and not hasattr(RelatedModel, related_model_prop_fk_key)) 
         ):
             direction = MANYTOONE
         elif (
             hasattr(RelatedModel, back_populates) 
-            and hasattr(RelatedModel, related_model_prop_pk_key) 
+            and hasattr(RelatedModel, related_model_prop_fk_key) 
             and not hasattr(model, model_prop_pk_key)):
             direction = ONETOMANY
         else:
             direction = MANYTOONE
     else:
         direction = MANYTOMANY
-    # setattr(model_prop, 'direction', direction)
+    setattr(model_prop, 'direction', direction)
     
     print(f'Direction of prop {model_prop} is: {direction}')
     
@@ -727,7 +747,7 @@ def fetch_model_instance_relationship(
     rel_direction = get_relationship_direction(model_instance, model_prop)
 
     RelatedModel = get_related_model(model_prop)
-    related_model_pk_column = get_model_pk(RelatedModel)
+    related_model_pk_column = get_model_pk(RelatedModel, matching_col=model_pk_column)
 
     # model_prop_query_attr = '_{}_query'.format(model_prop.key)
     # if getattr(model_instance, model_prop_query_attr, None) is None:
@@ -846,7 +866,7 @@ async def await_relationship(
 
 def get_related_property_gino_loader(GinoModelClass: GinoModelType, model_class_pk, key, prop):
     RelatedModelClass = get_related_model(prop)
-    rel_pk = get_model_pk(RelatedModelClass)
+    rel_pk = get_model_pk(RelatedModelClass, matching_col=model_class_pk)
     return GinoModelClass.load(**{key: RelatedModelClass.on(model_class_pk == rel_pk)})
 
 

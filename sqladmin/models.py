@@ -700,8 +700,19 @@ class ModelAdmin(BaseModelAdmin, ModelAdminParamsMixin, metaclass=ModelAdminMeta
                     session.add(obj)
             else:
                 await anyio.to_thread.run_sync(self._add_object_sync, obj)
-
+    
+    async def prepare_update_data(
+        self, 
+        pk: Any, 
+        data: Dict[str, Any], 
+        files:Optional[Dict]=None
+    ) -> Dict:
+        return data
+    
     async def update_model(self, pk: Any, data: Dict[str, Any]) -> None:
+        extra_data_keys = self.get_scaffold_form_extra()
+        extra_data = { k: v for k, v in data.items() if k in extra_data_keys}
+        data = { k: v for k, v in data.items() if k not in extra_data_keys}
         if self.backend == BackendEnum.GINO:
             data, non_cols_data = await prepare_gino_model_data(self.model, data)
             data = self.model(**data).to_dict()
@@ -744,6 +755,14 @@ class ModelAdmin(BaseModelAdmin, ModelAdminParamsMixin, metaclass=ModelAdminMeta
                         setattr(result, name, value)
             else:
                 await anyio.to_thread.run_sync(self._update_modeL_sync, pk, data)
-
+    
+    async def get_scaffold_form_extra(self):
+        return dict()
+    
     async def scaffold_form(self) -> Type[Form]:
-        return await get_model_form(model=self.model, engine=self.engine, backend=self.backend)
+        return await get_model_form(
+            model=self.model, 
+            engine=self.engine, 
+            backend=self.backend, 
+            extra_fields=await self.get_scaffold_form_extra()
+        )
