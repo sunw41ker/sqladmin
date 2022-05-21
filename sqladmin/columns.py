@@ -22,7 +22,12 @@ class BaseModelAdminColumn(BaseModel):
                 data[self._MAPPER_KEY] = sa_inspect(data['model']) 
             data['model_class'] = data[self._MAPPER_KEY].class_
         if data.get('field_prop') is None:
-            data['field_prop'] = getattr(data['model_class'], data['field'])
+            if data['field'] in ('heigth', 'weight', ):
+                print()
+            try:
+                data['field_prop'] = getattr(data['model_class'], data['field'])
+            except AttributeError as e:
+                data['field_prop'] = None
         super().__init__(**data)
 
     @classmethod

@@ -1,9 +1,11 @@
 from asyncio import iscoroutine
+import json
 import anyio
 import inspect
-from typing import Any, Callable, Dict, Sequence, Type, Union, Optional, Iterable, no_type_check
+from typing import Any, Callable, Dict, List, Sequence, Type, Union, Optional, Iterable, no_type_check
 
 from sqlalchemy import inspect as sqlalchemy_inspect, select
+from sqlalchemy.sql.functions import Function as SA_Function
 from sqlalchemy.orm.attributes import InstrumentedAttribute
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm.attributes import QueryableAttribute
@@ -27,12 +29,12 @@ from wtforms import (
 )
 from wtforms.fields.core import UnboundField
 from wtforms.fields import FileField, MultipleFileField
-from pydantic import BaseModel as PydanticBaseModel
+from pydantic import BaseModel as PydanticBaseModel, ValidationError
 from pydantic.fields import ModelField as PydanticModelField
 from sqladmin.backends.gino.models import get_related_model, get_relation_property_id_col, get_model_pk, get_relationship_direction
 
 from sqladmin.schemas import RelationshipModelField as PydanticRealtionshipModelField
-from sqladmin.fields import QuerySelectField, QuerySelectMultipleField
+from sqladmin.fields import QuerySelectField, QuerySelectMultipleField, JSONField, CodeField
 from sqladmin.backends import BackendEnum, get_used_backend
 
 used_backend: BackendEnum = get_used_backend()
@@ -125,6 +127,7 @@ class ModelConverterBase:
                 return
 
             default = getattr(column, "default", None)
+            
 
             if default is not None:
                 # Only actually change default if it has an attribute named
@@ -138,14 +141,15 @@ class ModelConverterBase:
                         if callable(callable_default)
                         else callable_default
                     )
-
+            # TODO: improve sql statement excecution
+            if isinstance(default, (SA_Function, )):
+                default = await engine.scalar(default)
             kwargs["default"] = default
 
             if column.nullable or column.type.python_type is bool:
                 kwargs["validators"].append(validators.Optional())
             else:
                 kwargs["validators"].append(validators.InputRequired())
-
             converter = self.get_converter(column)
         else:
             nullable = True
@@ -232,9 +236,13 @@ class ModelConverterBase:
             
             if isinstance(prop, Cast):
                 if hasattr(prop, 'type'):
+                    kwargs.pop("allow_blank", None)
+                    kwargs.pop("object_list", None)
                     converter = self.converters[type(prop.type).__name__]
             # elif isinstance(prop, QueryableAttribute):
             if isinstance(prop, QueryableAttribute):
+                kwargs.pop("allow_blank", None)
+                kwargs.pop("object_list", None)
                 if hasattr(prop, 'descriptor'):
                     if prop.descriptor.__class__.__name__ == 'hybrid_property':
                         type_guess = getattr(prop.descriptor.fget, '__annotations__', {}).get('return', str)
@@ -245,11 +253,13 @@ class ModelConverterBase:
                 else:
                     converter = self.converters['RelationshipProperty']
             else:
+                kwargs.pop("allow_blank", None)
+                kwargs.pop("object_list", None)
                 if hasattr(prop, 'class_') and prop.class_ is not None:
                     converter = self.converters[prop.class_.__name__]
                 elif hasattr(prop, 'type'):
                     converter = self.converters[type(prop.type).__name__]
-                    kwargs.pop("allow_blank")
+                    
                 # else:
                 #     converter = self.converters['String']  # remove this!
         if converter is None:
@@ -414,11 +424,11 @@ class ModelConverter(ModelConverterBase):
         # temporary disabled password fields
         field_args['render_kw'] = {'disabled':'', 'type': 'password'}
         return StringField(**field_args)
-    
+       
     @converts("JSONB")
     def conv_JSONB(self, field_args: Dict, **kwargs: Any) -> Field:
         # self._string_common(field_args=field_args, **kwargs)
-        return TextAreaField(**field_args)
+        return JSONField(**field_args)
     
     @converts("ProfileLocality")
     def conv_ProfileLocality(self, field_args: Dict, **kwargs: Any) -> Field:
@@ -428,14 +438,14 @@ class ModelConverter(ModelConverterBase):
     @converts("ARRAY")
     def conv_ARRAY(self, field_args: Dict, **kwargs: Any) -> Field:
         # self._string_common(field_args=field_args, **kwargs)
-        return TextAreaField(**field_args)
+        return JSONField(**field_args)
     
     @converts("hybrid_property")
     def conv_hybrid_property(self, field_args: Dict, **kwargs: Any) -> Field:
         # self._string_common(field_args=field_args, **kwargs)
         field_args.pop("allow_blank", None)
         field_args.pop("object_list", None)
-        return TextAreaField(**field_args)
+        return CodeField(**field_args)
     # sqlalchemy_utils.types.email.EmailType
 
 
@@ -767,18 +777,68 @@ class ModelConverter(ModelConverterBase):
 
 class ModelFromMixin:
     @property
-    def has_file_fields(self):
+    def has_file_fields(self) -> bool:
         for field in self:
             if isinstance(field, (FileField, MultipleFileField, )):
                 return True
         return False
     
     @property
-    def form_enctype(self):
+    def form_enctype(self) -> Optional[str]:
         if self.has_file_fields:
             return 'multipart/form-data'
         return None
     
+    def _try_json_loads(self, value):
+        try:
+            if isinstance(value, str):
+                return json.loads(value)
+        except json.decoder.JSONDecodeError as exc:
+            pass
+        return value
+    
+    @property
+    def data(self):
+        data = super().data
+        return {k:self._try_json_loads(v) for k, v in data.items()}
+    
+    def validate(self: Form, schema: Optional[PydanticBaseModel]=None, extra_validators: Optional[Dict]=None) -> bool:
+        rv = Form.validate(self, extra_validators=extra_validators)
+        if not rv:
+            return False
+        try:
+            if schema is not None:
+                schema.validate(self.data)
+        except ValidationError as exc:
+            for e in exc.errors():
+                if hasattr(self, e['loc'][0]):                    
+                    msg = ', '.join([e for e in [
+                        e['msg'], e.get('type'), str(e['ctx']) if 'ctx' in e else None
+                    ] if e is not None])
+                    getattr(self, e['loc'][0]).errors.append(msg)
+            return False
+        return True
+    
+    def as_pydantic(self, pydantic_cls: PydanticBaseModel, alias:bool=False) -> PydanticBaseModel:
+        # TODO: implement this!
+        data = self.data
+        fields: List[str] = list(pydantic_cls.schema(alias).get("properties").keys())    
+        pydata = {}
+        for f in fields:
+            if f in data:
+                pydata[f] = data[f]
+            else:
+                # try to guess...
+                if (f.endswith('_id') 
+                    and f[:-3] in data
+                    and hasattr(data[f[:-3]], ('id'))     
+                ):
+                    pass
+                
+            print(f)
+        return pydantic_cls
+        
+        
 async def get_model_form(
     model: type,
     engine: Union[Engine, AsyncEngine],
@@ -821,7 +881,7 @@ async def get_model_form(
     if extra_fields:
         field_dict.update(extra_fields)
     
-    return type(type_name, (Form, ModelFromMixin, ), field_dict)
+    return type(type_name, (ModelFromMixin, Form, ), field_dict)
 
 
 async def prepare_endpoint_form_display(form: Form, endpoint: str):

@@ -15,6 +15,7 @@ __all__ = [
     "DateField",
     "DateTimeField",
     "JSONField",
+    "CodeField",
     "QuerySelectField",
     "QuerySelectMultipleField",
     "Select2Field",
@@ -232,14 +233,18 @@ class Select2TagsField(fields.StringField):
 
 
 class JSONField(fields.TextAreaField):
-    def _value(self) -> str:
+    def _value(self, dump_kwargs={}) -> str:
         if self.raw_data:
             return self.raw_data[0]
-        # elif self.data:
-        #     # prevent utf8 characters from being converted to ascii
-        #     return as_str(json.dumps(self.data, ensure_ascii=False))
+        elif self.object_data:
+            # prevent utf8 characters from being converted to ascii
+            return as_str(json.dumps(self.object_data, ensure_ascii=False, **dump_kwargs))
+        elif self.data:
+            if isinstance(self.data, str):
+                return self.data 
+            return as_str(json.dumps(self.object_data, ensure_ascii=False, **dump_kwargs))
         else:
-            return "{}"
+            return ""
 
     def process_formdata(self, valuelist: List[str]) -> None:
         if valuelist:
@@ -254,6 +259,31 @@ class JSONField(fields.TextAreaField):
                 self.data = json.loads(valuelist[0])
             except ValueError:
                 raise ValueError(self.gettext("Invalid JSON"))
+
+
+class CodeField(fields.TextAreaField):
+    def _value(self) -> str:
+        if self.raw_data:
+            return self.raw_data[0]
+        # elif self.data:
+        #     # prevent utf8 characters from being converted to ascii
+        #     return as_str(json.dumps(self.data, ensure_ascii=False))
+        else:
+            return ""
+
+    # def process_formdata(self, valuelist: List[str]) -> None:
+    #     if valuelist:
+    #         value = valuelist[0]
+
+    #         # allow saving blank field as None
+    #         if not value:
+    #             self.data = None
+    #             return
+
+    #         try:
+    #             self.data = json.loads(valuelist[0])
+    #         except ValueError:
+    #             raise ValueError(self.gettext("Invalid JSON"))
 
 
 class QuerySelectField(fields.SelectFieldBase):

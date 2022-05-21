@@ -581,7 +581,13 @@ def get_secondary_model_fk(Model, SecondaryModel, default=None):
     return getattr(SecondaryModel, key, default)
 
 
-def get_model_pk(class_, *, single=True, raise_on_multiple=False, matching_col:Optional[Column]=None, matching_model:Optional[GinoModelType]=None):
+def get_model_pk(
+    class_, *, 
+    single=True, 
+    raise_on_multiple=False, 
+    matching_col:Optional[Column]=None, 
+    matching_model:Optional[GinoModelType]=None
+):
     try:
         mapper = inspect(class_)
     except NoInspectionAvailable:

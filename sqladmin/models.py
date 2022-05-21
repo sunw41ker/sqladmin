@@ -1,3 +1,5 @@
+import json
+from fastapi import HTTPException
 from sqladmin.backends.gino.models import prepare_gino_model_data, process_gino_model_post_create
 from sqladmin.filters import ModelAdminParamsMixin
 from sqladmin.pagination import Pagination
@@ -6,8 +8,10 @@ from sqladmin.forms import get_model_form
 from sqladmin.exceptions import InvalidColumnError, InvalidModelError
 from wtforms import Form
 from starlette.requests import Request
+from starlette import status 
 from sqlalchemy import Column, and_, all_
 # from sqlalchemy.sql.elements import Cast
+from sqlalchemy.orm.attributes import QueryableAttribute
 from sqlalchemy.sql.elements import ClauseElement, Cast
 from sqlalchemy.orm.attributes import InstrumentedAttribute
 from typing import (
@@ -43,6 +47,7 @@ from collections.abc import Mapping as PythonMapping
 from sqladmin import backends
 from sqladmin.backends import BackendEnum, get_used_backend
 from pydantic import BaseModel
+from pydantic.error_wrappers import ValidationError
 
 used_backend: BackendEnum = get_used_backend()
 
@@ -164,7 +169,7 @@ class ModelAdmin(BaseModelAdmin, ModelAdminParamsMixin, metaclass=ModelAdminMeta
     """
 
     model: ClassVar[type]
-    # schema: ClassVar[BaseModel]
+    schema: Optional[BaseModel] = None
 
     # Internals
     pk_column: ClassVar[Column]
@@ -419,7 +424,10 @@ class ModelAdmin(BaseModelAdmin, ModelAdminParamsMixin, metaclass=ModelAdminMeta
             for _, attr in self.get_list_columns():
                 if isinstance(attr, RelationshipProperty):
                     stmt = stmt.options(selectinload(self.get_key(attr)))
-
+        
+        # sa_gino: Gino = self.engine
+        # test = await sa_gino.scalar(select([sa_gino.JSON.NULL]))
+        
         rows = await self._run_query(stmt)
         pagination = Pagination(
             rows=rows,
@@ -547,6 +555,7 @@ class ModelAdmin(BaseModelAdmin, ModelAdminParamsMixin, metaclass=ModelAdminMeta
     def get_model_attr(
         self, attr: Union[str, InstrumentedAttribute, Column, RelationshipProperty]
     ) -> Union[ColumnProperty, RelationshipProperty]:
+        assert attr is not None
         assert isinstance(attr, (str, InstrumentedAttribute, RelationshipProperty,
                           Column, property, hybrid_property))
 
@@ -567,6 +576,16 @@ class ModelAdmin(BaseModelAdmin, ModelAdminParamsMixin, metaclass=ModelAdminMeta
             key = model_attr_match[0]
             if not hasattr(attr, 'key') or attr.key is None:
                 attr.key = key
+        # elif isinstance(attr, QueryableAttribute):
+        #      # TODO: QueryableAttribute key
+        #     model_attr_match = [
+        #         a
+        #         for a in dir(self.model)
+        #         if getattr(self.model, a, None) == attr
+        #     ]
+        #     key = model_attr_match[0]
+        #     if not hasattr(attr, 'key') or attr.key is None:
+        #         attr.key = key
         elif hasattr(attr, 'prop') and isinstance(attr.prop, ColumnProperty):
             key = attr.name
         elif hasattr(attr, 'prop') and isinstance(attr.prop, (RelationshipProperty, )):
@@ -674,7 +693,26 @@ class ModelAdmin(BaseModelAdmin, ModelAdminParamsMixin, metaclass=ModelAdminMeta
             else:
                 await anyio.to_thread.run_sync(self._delete_object_sync, obj)
 
-    async def init_model_instance(self, data):
+    async def init_model_instance(self, data:Dict, **kwargs):
+        if self.schema is not None:
+            try:
+                _data = {}
+                for k, v in data.items():
+                    if v is None:
+                        continue
+                    if k == self.pk_column.key:
+                        continue
+                    if isinstance(v, str):
+                        if v.isnumeric():
+                            v = int(v)
+                    _data[k] = v
+                data = _data
+                data = self.schema.parse_obj(data).dict()
+            except ValidationError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=str(exc),
+                ) from exc
         if used_backend == BackendEnum.GINO:
             data, non_cols_data = await prepare_gino_model_data(self.model, data)
         model = self.model(**data)
@@ -689,11 +727,18 @@ class ModelAdmin(BaseModelAdmin, ModelAdminParamsMixin, metaclass=ModelAdminMeta
                     obj, '_post_create_model_data', None)
                 if post_create_data:
                     await process_gino_model_post_create(instance=obj, data=post_create_data)
+                await self.post_insert_model(obj=obj, obj_extra=obj_extra)
+                return obj
             else:
                 if not isinstance(obj, PythonMapping):
                     obj: dict = obj.to_dict()
                     obj.pop(self.pk_column.key, None)
-                await self.model.create(**obj)
+                obj = await self.model.create(**obj)
+                post_create_data = getattr(
+                    obj, '_post_create_model_data', None)
+                if post_create_data:
+                    await process_gino_model_post_create(instance=obj, data=post_create_data)
+                return obj
         elif self.backend in (BackendEnum.SA_13, BackendEnum.SA_14, ):
             if self.async_engine:
                 async with self.sessionmaker.begin() as session:
@@ -701,39 +746,90 @@ class ModelAdmin(BaseModelAdmin, ModelAdminParamsMixin, metaclass=ModelAdminMeta
             else:
                 await anyio.to_thread.run_sync(self._add_object_sync, obj)
     
+    async def post_insert_model(self, obj, obj_extra):
+        pass
+    
     async def prepare_update_data(
         self, 
-        pk: Any, 
-        data: Dict[str, Any], 
-        files:Optional[Dict]=None
+        # pk: Any, 
+        # data: Dict[str, Any], 
+        # files:Optional[Dict]=None,
+        **kwargs,
     ) -> Dict:
+        data = await self.schema_cast(**kwargs)
+        return data
+    
+    async def schema_cast(
+        self, *,
+        data: Dict,
+        form: Form,
+        request: Request,
+        **kwargs,
+    ) -> Dict:
+        if hasattr(self, 'schema'):
+            # req_body = await request.body()
+            # pydantic = self.schema.parse_raw(req_body)
+            # schema.parse_obj()
+            # data = self.model(**data).to_dict()
+            # pydantic_model = form.as_pydantic(self.schema)
+            # data = pydantic_model.dict()
+            pass
         return data
     
     async def update_model(self, pk: Any, data: Dict[str, Any]) -> None:
-        extra_data_keys = self.get_scaffold_form_extra()
+        extra_data_keys = await self.get_scaffold_form_extra()
         extra_data = { k: v for k, v in data.items() if k in extra_data_keys}
         data = { k: v for k, v in data.items() if k not in extra_data_keys}
         if self.backend == BackendEnum.GINO:
-            data, non_cols_data = await prepare_gino_model_data(self.model, data)
-            data = self.model(**data).to_dict()
+            # data = self.model(**data).to_dict()
             _data = {}
             for k, v in data.items():
-                if v is None:
+                if v is None or v == '':
                     continue
                 if k == self.pk_column.key:
                     continue
                 if isinstance(v, str):
                     if v.isnumeric():
                         v = int(v)
+                    else: 
+                        try:
+                            v = json.loads(v)
+                        except Exception as e:
+                            pass  # TODO: FIX THIS!!!!!!!!!!
                 _data[k] = v
             data = _data
             pk = self._try_cast_pk(pk)
-            if hasattr(self, 'pydantic_schema'):
+            if self.schema is not None:
                 # schema.parse_obj()
-                data = self.pydantic_schema(**data).dict()
+                # parse_data = {**data, **non_cols_data}
+                try:
+                    data = self.schema.parse_obj(data).dict()
+                except ValidationError as exc:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=str(exc),
+                    ) from exc
             else:
                 # model_data = self.model(**data).to_dict()
                 pass
+            data, non_cols_data = await prepare_gino_model_data(self.model, data)
+            _data = {}
+            for k, v in data.items():
+                if v is None or v == '':
+                    continue
+                
+                # if k == self.pk_column.key:
+                #     continue
+                # if isinstance(v, str):
+                #     if v.isnumeric():
+                #         v = int(v)
+                #     else: 
+                #         try:
+                #             v = json.loads(v)
+                #         except Exception as e:
+                #             pass  # TODO: FIX THIS!!!!!!!!!!
+                _data[k] = v
+            data = _data
             await self.model.update.values(**data).where(
                 self.pk_column == pk).gino.status()
             await process_gino_model_post_create(data=non_cols_data, instance_id=pk, Model=self.model)
