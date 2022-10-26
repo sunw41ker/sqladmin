@@ -255,12 +255,6 @@ class Admin(BaseAdminView):
             ],
             exception_handlers={HTTPException: http_exception},
         )
-        # app.include_router(
-        #     api_router,
-        #     prefix=f"{settings.LATEST_API_VERSION}/{APP_NAME}",
-        #     tags=[APP_NAME],
-        # )
-        # app.include_router(view_router)
         admin.state.root = self.app.state
         self.app.mount(base_url, app=admin, name="admin")
         # self.app.state

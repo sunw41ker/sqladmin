@@ -388,6 +388,7 @@ class FilteredOrderedAdminColumn(BaseModelAdminColumn):
         label = None
         model_class = None
         if isinstance(identity, str):
+            # TODO: add string column configuration
             # *path, field = identity.split(cls._MODEL_FIELD_PATH_SEPARATOR)
             path, field, subpath = cls.parse_field_path(identity)
             # TODO: add subpath support (for jsonb fields

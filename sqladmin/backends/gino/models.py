@@ -481,8 +481,8 @@ class InstanceStateGinoAdapter(interfaces.InspectionAttrInfo):
 
     def __getattribute__(self, attr):
         """Перенапраяляем обращение к несуществующим аттрибутам к self.get_inspected()"""
-        if attr == 'attrs':  # required for property ?
-            return super().__getattribute__(attr)
+        # if attr == 'attrs':  # required for property ?
+        #     return super().__getattribute__(attr)
         try:
             return super().__getattribute__(attr)
         except AttributeError:
@@ -513,9 +513,27 @@ def find_model_class(identity, base_model=None, extra: Optional[Dict]=None) -> C
         base_model = base_model or GinoRelationshipsLoader.get_base_model()
         # models = base_model.__subclasses__()
         class_attribute = getattr(identity, 'class_attribute', None)
+        # if class_attribute is None:
+        #     # identity.table.element.
+        #     class_attribute = identity.table.name
         # if isinstance(identity, Cast):
         #     print()
+        identity_table = getattr(identity, 'table', None)
+        if identity_table is None:
+            if getattr(identity, 'class_attribute', None) is not None:
+                identity_table = identity.class_attribute.table
+        # identity_table = identity.table
+        # except Exception as e:
+        #     identity_table = None
         for model in base_model.__subclasses__():
+            if type(identity_table.name).__name__ in ('str', 'quoted_name', ):
+                if model.__table__.name == identity_table.name:
+                    model_class = model
+                    break
+            else:
+                if model.__table__.name == identity_table.element.name:
+                    model_class = model
+                    break
             for attr in dir(model):
                 attr_val = getattr(model, attr, None)
                 if (

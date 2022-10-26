@@ -10,6 +10,7 @@ from wtforms import Form
 from starlette.requests import Request
 from starlette import status 
 from sqlalchemy import Column, and_, all_
+from sqlalchemy.engine import RowProxy
 # from sqlalchemy.sql.elements import Cast
 from sqlalchemy.orm.attributes import QueryableAttribute
 from sqlalchemy.sql.elements import ClauseElement, Cast
@@ -327,6 +328,7 @@ class ModelAdmin(BaseModelAdmin, ModelAdminParamsMixin, metaclass=ModelAdminMeta
 
     async def _run_query(self, stmt: ClauseElement) -> Any:
         if self.backend == BackendEnum.GINO:
+            # return await self._select_stmt
             return await self.model.__metadata__.all(stmt)
         if self.backend in (BackendEnum.SA_14, BackendEnum.SA_13):
             if self.async_engine:
@@ -377,13 +379,21 @@ class ModelAdmin(BaseModelAdmin, ModelAdminParamsMixin, metaclass=ModelAdminMeta
                 if isinstance(ecol, (Cast, )):
                     yield ecol, key
     
-    def get_list_statement(self, *, select_model, order_by, page_size, page, where=None):
+    def _select_stmt(self, *args, **kwargs):
+        if used_backend == BackendEnum.GINO:
+            return select(*args, **kwargs)
+        elif used_backend in (BackendEnum.SA_13, BackendEnum.SA_14, ):
+            return self.model.__metadata__.select(*args, **kwargs)
+    
+    async def get_list_statement(self, *, select_model, order_by, page_size, page, where=None, select_from=None):
         if not isinstance(select_model, (list, tuple, )):
             select_model = [select_model]
         select_full = [*select_model]
         for ecol, key in self._get_select_model_extra_columns(select_model):
             select_full.append(ecol.label(key))
-        stmt = select(select_full)
+        stmt = self._select_stmt(select_full)
+        if select_from is not None:
+            stmt = stmt.select_from(select_from)
         where = [w for w in ([where] + (self.get_list_params_where() or [])) if w is not None]
         if len(where) > 1:
             stmt = stmt.where(and_(*where))
@@ -393,27 +403,31 @@ class ModelAdmin(BaseModelAdmin, ModelAdminParamsMixin, metaclass=ModelAdminMeta
         stmt = stmt.order_by(*order_by).limit(page_size).offset((page - 1) * page_size)
         return stmt
 
-    def get_query_order_by(self, *args, **kwargs):
+    async def get_query_order_by(self, *args, **kwargs):
         return [self.pk_column]
     
-    def get_query_where(self, *args, **kwargs):
+    async def get_query_where(self, *args, **kwargs):
         return None
     
-    def get_query_select(self, *args, **kwargs):
+    async def get_query_select(self, *args, **kwargs):
         return self.model
+    
+    async def get_query_select_from(self, *args, **kwargs):
+        return None
 
     async def list(self, page: int, page_size: int, **kwargs) -> Pagination:
         page_size = min(page_size or self.page_size,
                         max(self.page_size_options))
 
         count = await self.count()
-        stmt = self.get_list_statement(
-            select_model=self.get_query_select(**kwargs.get('select', {})), 
-            order_by = self.get_query_order_by(**kwargs.get('order_by', {})), 
-            page_size=page_size, page=page, 
-            where=self.get_query_where(**kwargs.get('where', {}))
+        stmt = await self.get_list_statement(
+            select_model=await self.get_query_select(**kwargs.get('select', {})),
+            select_from=await self.get_query_select_from(**kwargs.get('select_from', {})), 
+            order_by = await self.get_query_order_by(**kwargs.get('order_by', {})),  
+            where=await self.get_query_where(**kwargs.get('where', {})),
+            page_size=page_size, 
+            page=page,
         )
-        # Artist.query.add_columns(slugify(Artist.Name).label("name_slug"))
 
         if used_backend == BackendEnum.GINO:
             for label, attr in self.get_list_columns():
@@ -505,23 +519,31 @@ class ModelAdmin(BaseModelAdmin, ModelAdminParamsMixin, metaclass=ModelAdminMeta
 
     def get_attr_value(
         self, obj: type, attr: Union[Column, ColumnProperty, RelationshipProperty],
-        placeholder_not_implemented: str = "Not implemented",
-        placeholder_none: str = "None"
+        placeholder_not_implemented: Any = None,
+        placeholder_none: Any = None,
+        placeholder_no_attr: Any = None,
     ) -> Any:
         if isinstance(attr, Column):
-            return getattr(obj, attr.name)
+            if isinstance(obj, RowProxy):
+                try:
+                    return obj[attr]
+                except Exception as e:
+                    # attr.table.element.name
+                    return placeholder_none
+            else:
+                return getattr(obj, attr.name)
         elif isinstance(attr, ColumnProperty):
             return getattr(obj, attr.columns[0].name)
         elif isinstance(attr, str):
             *path, key = attr.split('.')
             if len(path) == 1 and hasattr(obj, key):
-                return getattr(obj, key, None) 
+                return getattr(obj, key, placeholder_none) 
             model, *path = path
             
             try:
                 return getattrwalk(obj, [*path, key])
             except AttributeError:
-                return None
+                return placeholder_none
             mapper = sa_inspect(model)
             model_class = mapper.class_
             attr = getattr(model_class, key)
@@ -534,16 +556,16 @@ class ModelAdmin(BaseModelAdmin, ModelAdminParamsMixin, metaclass=ModelAdminMeta
                 else:
                     key = self.get_attr_key_by_obj(obj, attr)
             except AttributeError:
-                return None
+                return placeholder_no_attr
 
             # remove this!
             try:
                 if isinstance(obj, RowProxy):
-                    value = getattr(obj, key, placeholder_none)
+                    value = getattr(obj, key, placeholder_no_attr)
                 elif isinstance(attr, (RelationshipProperty, )):
-                    value = getattr(obj, key, placeholder_none)
+                    value = getattr(obj, key, placeholder_no_attr)
                 else:
-                    value = getattr(obj, key, placeholder_none)
+                    value = getattr(obj, key, placeholder_no_attr)
 
             except NotImplementedError:
                 value = placeholder_not_implemented
@@ -551,6 +573,25 @@ class ModelAdmin(BaseModelAdmin, ModelAdminParamsMixin, metaclass=ModelAdminMeta
             if isinstance(value, list):
                 return ", ".join(map(str, value))
             return value
+
+
+    def get_attr_value_display(
+        self, obj: type, attr: Union[Column, ColumnProperty, RelationshipProperty],
+        placeholder_not_implemented: Any = 'Not implemented',
+        placeholder_none: Any = '-',
+        placeholder_no_attr: Any = 'No attr',
+    ) -> Any:
+        value = self.get_attr_value(
+            obj=obj, 
+            attr=attr, 
+            placeholder_none=placeholder_none,
+            placeholder_no_attr=placeholder_no_attr,
+            placeholder_not_implemented=placeholder_not_implemented,
+        )
+        if value is None:
+            return placeholder_none
+        return value
+
 
     def get_model_attr(
         self, attr: Union[str, InstrumentedAttribute, Column, RelationshipProperty]
@@ -815,8 +856,8 @@ class ModelAdmin(BaseModelAdmin, ModelAdminParamsMixin, metaclass=ModelAdminMeta
             data, non_cols_data = await prepare_gino_model_data(self.model, data)
             _data = {}
             for k, v in data.items():
-                if v is None or v == '':
-                    continue
+                # if v is None or v == '':
+                #     continue
                 
                 # if k == self.pk_column.key:
                 #     continue
@@ -855,10 +896,14 @@ class ModelAdmin(BaseModelAdmin, ModelAdminParamsMixin, metaclass=ModelAdminMeta
     async def get_scaffold_form_extra(self):
         return dict()
     
+    async def get_field_options_objects(self, *args, **kwargs):
+        return None
+    
     async def scaffold_form(self) -> Type[Form]:
         return await get_model_form(
             model=self.model, 
             engine=self.engine, 
             backend=self.backend, 
-            extra_fields=await self.get_scaffold_form_extra()
+            extra_fields=await self.get_scaffold_form_extra(),
+            objects_getter=self.get_field_options_objects,
         )

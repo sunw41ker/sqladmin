@@ -1,5 +1,6 @@
 from asyncio import iscoroutine
 import json
+from types import FunctionType
 import anyio
 import inspect
 from typing import Any, Callable, Dict, List, Sequence, Type, Union, Optional, Iterable, no_type_check
@@ -105,6 +106,8 @@ class ModelConverterBase:
         backend: BackendEnum,
         *args, **_kwargs
     ) -> UnboundField:
+        objects_getter = _kwargs.get('objects_getter')
+        # objects_getter = _kwargs.get('objects_getter')
         kwargs: Dict = {
             "validators": [],
             "filters": [],
@@ -180,38 +183,67 @@ class ModelConverterBase:
             if backend in (BackendEnum.SA_13, BackendEnum.SA_14, ):
                 if isinstance(engine, Engine):
                     with Session(engine) as session:
-                        objects = await anyio.to_thread.run_sync(session.execute, stmt)
-                        object_list = [
-                            (str(self.get_pk(obj, pk)), obj)
-                            for obj in objects.scalars().all()
-                        ]
+                        object_list = await objects_getter(
+                            model_class=model,
+                            column=column,
+                            # related_model_class=RelatedModelClass,
+                            mapper=mapper,
+                            prop=prop,
+                            engine=engine,
+                            backend=backend,
+                        )
+                        if not object_list:
+                            objects = await anyio.to_thread.run_sync(session.execute, stmt)
+                            object_list = [
+                                (str(self.get_pk(obj, pk)), obj)
+                                for obj in objects.scalars().all()
+                            ]
                         kwargs["object_list"] = object_list
                 else:
                     async with AsyncSession(engine) as session:
-                        objects = await session.execute(stmt)
-                        object_list = [
-                            (str(self.get_pk(obj, pk)), obj)
-                            for obj in objects.scalars().all()
-                        ]
+                        object_list = await objects_getter(
+                            model_class=model,
+                            column=column,
+                            # related_model_class=RelatedModelClass,
+                            mapper=mapper,
+                            prop=prop,
+                            engine=engine,
+                            backend=backend,
+                        )
+                        if not object_list:
+                            objects = await session.execute(stmt)
+                            object_list = [
+                                (str(self.get_pk(obj, pk)), obj)
+                                for obj in objects.scalars().all()
+                            ]
                         kwargs["object_list"] = object_list
             elif backend == BackendEnum.GINO:
                 if isinstance(prop, RelationshipProperty):
                     RelatedModelClass = get_related_model(prop)
-                    objects = await engine.all(
-                        stmt.execution_options(loader=RelatedModelClass), 
-                        # loader=RelatedModelClass,
-                        # return_model=True,
-                        # model=RelatedModelClass
-                    )
                     pk = get_model_pk(RelatedModelClass, matching_model=model).key
-                    # # object_list = objects
-                    # # objects = await session.execute(stmt)
-                    # print()
-                    object_list = [
-                        (str(self.get_pk(obj, pk)), obj)
-                        for obj in objects
-                    ]
-                    
+                    object_list = await objects_getter(
+                        model_class=model,
+                        column=column,
+                        related_model_class=RelatedModelClass,
+                        mapper=mapper,
+                        prop=prop,
+                        engine=engine,
+                        backend=backend,
+                    )
+                    if not object_list:
+                        objects = await engine.all(
+                            stmt.execution_options(loader=RelatedModelClass), 
+                            # loader=RelatedModelClass,
+                            # return_model=True,
+                            # model=RelatedModelClass
+                        )
+                        # # object_list = objects
+                        # # objects = await session.execute(stmt)
+                        # print()
+                        object_list = [
+                            (str(self.get_pk(obj, pk)), obj)
+                            for obj in objects
+                        ]
                     # object_list = await RelatedModelClass.query.gino.all()
                     kwargs["object_list"] = object_list
                 # else:
@@ -322,11 +354,21 @@ class ModelConverter(ModelConverterBase):
     @converts("ChoiceType")
     def conv_ChoiceType(self, column: Column, field_args: Dict, **kwargs: Any) -> Field:
         def get_val(choice):
-            if hasattr(choice, 'value'):
-                return choice.value
-            else:
+            if isinstance(choice, str):
                 return choice
-        field_args["choices"] = [(get_val(e), e) for e in column.type.choices]
+            if hasattr(choice, 'value'):
+                return str(choice.value)
+            else:
+                return str(choice)
+        def get_label(choice):
+            if getattr(choice, 'description', None) is not None:
+                return choice.description
+            if getattr(choice, 'name', None) is not None:
+                return choice.name
+            return str(choice)
+                
+        field_args["choices"] = [(get_val(e), get_label(e)) for e in column.type.choices]
+        field_args["coerce"] = get_val
         return SelectField(**field_args)
 
     @converts("Integer")  # includes BigInteger and SmallInteger
@@ -364,11 +406,18 @@ class ModelConverter(ModelConverterBase):
     #     field_args["validators"].append(validators.MacAddress())
     #     return StringField(**field_args)
 
-    # @converts("dialects.postgresql.base.UUID")
-    # def conv_PGUuid(self, field_args: Dict, **kwargs: Any) -> Field:
-    #     field_args.setdefault("label", "UUID")
-    #     field_args["validators"].append(validators.UUID())
-    #     return StringField(**field_args)
+    @converts("UUID")
+    def conv_PGUuid(self, field_args: Dict, **kwargs: Any) -> Field:
+        field_args.setdefault("label", "UUID")
+        field_args["validators"].append(validators.UUID())
+        return StringField(**field_args)
+    
+    
+    @converts("Interval")
+    def conv_PGInterval(self, field_args: Dict, **kwargs: Any) -> Field:
+        field_args.setdefault("label", "Период")
+        # field_args["validators"].append(validators.UUID())
+        return StringField(**field_args)
 
     def _get_label(self, obj):
         return str(obj)
@@ -430,7 +479,7 @@ class ModelConverter(ModelConverterBase):
         # self._string_common(field_args=field_args, **kwargs)
         return JSONField(**field_args)
     
-    @converts("ProfileLocality")
+    @converts("ProfileLocality", "LocalityPoint")
     def conv_ProfileLocality(self, field_args: Dict, **kwargs: Any) -> Field:
         # self._string_common(field_args=field_args, **kwargs)
         return StringField(**field_args)
@@ -847,6 +896,7 @@ async def get_model_form(
     exclude: Sequence[str] = None,
     schema: PydanticBaseModel = None,
     extra_fields: Optional[Dict[str, Any]] = None,
+    objects_getter: Optional[FunctionType] = None,
 ) -> Type[Form]:
     type_name = model.__name__ + "Form"
     
@@ -874,7 +924,14 @@ async def get_model_form(
 
     field_dict = {}
     for name, attr in attributes:
-        field = await converter.convert(model, mapper, attr, engine, backend)
+        field = await converter.convert(
+            model, 
+            mapper, 
+            attr, 
+            engine, 
+            backend, 
+            objects_getter=objects_getter
+        )
         if field is not None:
             field_dict[name] = field
 
