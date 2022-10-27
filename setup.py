@@ -27,14 +27,14 @@ package_data = \
               'templates/sqladmin/modals/*']}
 
 install_requires = \
-['Jinja2',
+['Jinja2>=2.0,<3.0',
  'aiosqlite>=0.17.0,<0.18.0',
  'mypy==0.931',
  'pydantic>=1.8.2,<2.0.0',
  'python-multipart>=0.0.5,<0.0.6',
  'reform>=0.2,<0.3',
  'sqlalchemy==1.3.15',
- 'starlette',
+ 'starlette>=0.13.0,<0.14.0',
  'wtforms-appengine>=0.1,<0.2',
  'wtforms>=3,<4']
 
@@ -56,3 +56,4 @@ setup_kwargs = {
 
 
 setup(**setup_kwargs)
+
