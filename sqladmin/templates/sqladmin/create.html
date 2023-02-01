@@ -11,7 +11,7 @@
           {% for field in form %}
           <div class="mb-3 form-group row">
             {{ field.label(class_="form-label col-sm-2 col-form-label") }}
-            <div class="col-sm-10">
+            <div class="col-sm-10 {{ field.render_kw.wrapper_class }}">
               {% if field.errors %}
               {{ field(class_=(field.render_kw.class or "form-control") + " is-invalid") }}
               {% else %}

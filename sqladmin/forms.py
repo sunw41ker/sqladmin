@@ -335,6 +335,11 @@ class ModelConverter(ModelConverterBase):
     @converts("Boolean", "dialects.mssql.base.BIT", "bool")
     def conv_Boolean(self, field_args: Dict, **kwargs: Any) -> Field:
         # field_args.pop('allow_blank', None)
+        field_args['render_kw'] = {
+            'class': 'form-check-input', 
+            # TODO: change checkbox to switch
+            'wrapper_class': 'form-check form-check-single form-switch',
+        }
         field_args.pop("object_list", None)
         return BooleanField(**field_args)
 
