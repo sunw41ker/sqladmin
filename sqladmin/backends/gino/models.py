@@ -365,7 +365,6 @@ class GinoModelMapperAdapter:
 
     @property
     def identity(self):
-        pk = list(self.inspected.primary_key)[0]
         if self._instance is None:
             return list(self.inspected.primary_key)
         return [getattr(self._instance, c.key) for c in self.inspected.primary_key]
