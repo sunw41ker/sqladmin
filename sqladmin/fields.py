@@ -8,7 +8,7 @@ from wtforms import Form, ValidationError, fields, widgets
 
 from sqladmin import widgets as sqladmin_widgets
 from sqladmin.helpers import as_str, sa_inspect as inspect
-
+from logging import getLogger, Logger
 
 
 __all__ = [
@@ -22,6 +22,9 @@ __all__ = [
     "Select2TagsField",
     "TimeField",
 ]
+
+
+logger: Logger = getLogger(__name__)
 
 
 class DateField(fields.DateField):
@@ -441,9 +444,21 @@ class QuerySelectMultipleField(QuerySelectField):
         self._data = data
         self._formdata = None
 
+    def get_primary_keys(self) -> List[str]:
+        primary_keys = []
+        for m in self.data:
+            ids = inspect(m).identity
+            if ids:
+                primary_keys.append(str(ids[0]))
+            else:
+                logger.warning('failed to get pk for:', str(m))
+                logger.debug('field:', str(self))
+                primary_keys.append(str(m))
+        return primary_keys
+                
     def iter_choices(self) -> Generator[Tuple[str, Any, bool], None, None]:
         if self.data is not None:
-            primary_keys = [str(inspect(m).identity[0]) for m in self.data]
+            primary_keys = self.get_primary_keys()
             for pk, obj in self._object_list:
                 yield (pk, self.get_label(obj), pk in primary_keys)
 
