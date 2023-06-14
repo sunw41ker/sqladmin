@@ -89,12 +89,17 @@ class ModelAdminMeta(type):
         mapper = mcls._get_model_mapper(model)
 
         pk_columns = list(mapper.primary_key)
-
-        if not kwargs.get("first_of_multiple", False):
-            assert len(pk_columns) == 1, "Multiple PK columns not supported."
-
-        cls.pk_column = pk_columns[0]
-
+        cls.pk_column = None
+        if len(pk_columns) == 1 or kwargs.get("first_of_multiple", False):
+            cls.pk_column = pk_columns[0]
+        else:
+            cls.pk_column = attrs.get("pk_column")
+            
+        # if not kwargs.get("first_of_multiple", False):
+        #     assert len(pk_columns) == 1, "Multiple PK columns not supported."
+        
+        assert cls.pk_column is not None
+        
         cls.identity = attrs.get(
             "identity", slugify_class_name(model.__name__))
         cls.model = model
@@ -720,13 +725,13 @@ class ModelAdmin(BaseModelAdmin, ModelAdminParamsMixin, metaclass=ModelAdminMeta
 
     async def delete_model(self, obj: Any) -> None:
         if self.backend == BackendEnum.GINO:
-            if hasattr(obj, 'id'):  # TODO: remove this!
-                pk = obj.id
-            else:
-                pk = obj.user_id
-            pk = self._try_cast_pk(obj.id)
-            await self.model.delete.where(
-                self.pk_column == pk).gino.status()
+            try:
+                await obj.delete()
+            except Exception as e:
+                pk_value = self._try_cast_pk(getattr(obj, self.pk_column.name))
+                await self.model.delete.where(
+                    self.pk_column == pk_value).gino.status()
+                
         elif self.backend in (BackendEnum.SA_13, BackendEnum.SA_14, ):
             if self.async_engine:
                 async with self.sessionmaker.begin() as session:
@@ -907,4 +912,5 @@ class ModelAdmin(BaseModelAdmin, ModelAdminParamsMixin, metaclass=ModelAdminMeta
             backend=self.backend, 
             extra_fields=await self.get_scaffold_form_extra(),
             objects_getter=self.get_field_options_objects,
+            model_admin=self,
         )

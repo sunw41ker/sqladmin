@@ -313,6 +313,7 @@ class GinoModelMapperAdapter:
             attr.doc = 'doc text of attribute'
         return attr
 
+    @lru_cache
     def _get_model_class_attrs(self, class_, init=False) -> OrderedDict:
         attrs_collection = OrderedDict()
         class_keys = dir(class_)

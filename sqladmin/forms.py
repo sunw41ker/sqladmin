@@ -74,9 +74,9 @@ def converts(*args: str) -> Callable:
 class ModelConverterBase:
     _convert_for = None
 
-    def __init__(self) -> None:
+    def __init__(self, model_admin: type=None) -> None:
         converters = {}
-
+        self.model_admin = model_admin
         for name in dir(self):
             obj = getattr(self, name)
             if hasattr(obj, "_converter_for"):
@@ -85,17 +85,46 @@ class ModelConverterBase:
 
         self.converters = converters
 
-    def get_converter(self, column: Column) -> Callable:
-        types = inspect.getmro(type(column.type))
-
-        # Search by name
+    def get_type_converter(self, type_guess) -> Any:
+        types = inspect.getmro(type(type_guess))
         for col_type in types:
             if col_type.__name__ in self.converters:
                 return self.converters[col_type.__name__]
+        
+        while type_guess.__bases__ or type_guess.__bases__[0] == object:
+            if type_guess.__name__ in self.converters:
+                return self.converters[type_guess.__name__]
+            else:
+                type_guess = type_guess.__bases__[0]
+        
+        # raise Exception(
+        #     f"Could not find field converter for column {column.name} ({types[0]!r})."
+        # )
+        # while type_guess.__bases__ or type_guess.__bases__[0] == object:
+        #     if type_guess.__name__ in self.converters:
+        #         return self.converters[type_guess.__name__]
+        #     else:
+        #         type_guess = type_guess.__bases__[0]
+        # return None
+    
+    def get_converter(self, column: Column) -> Callable:
+        converter = self.get_type_converter(column.type)
+        if not converter:
+            raise Exception(
+                f"Could not find field converter for column {column.name} ({column.type!r})."
+            )
+        
+        return converter   
+        # types = inspect.getmro(type(column.type))
 
-        raise Exception(
-            f"Could not find field converter for column {column.name} ({types[0]!r})."
-        )
+        # # Search by name
+        # for col_type in types:
+        #     if col_type.__name__ in self.converters:
+        #         return self.converters[col_type.__name__]
+
+        # raise Exception(
+        #     f"Could not find field converter for column {column.name} ({types[0]!r})."
+        # )
 
     async def convert(
         self,
@@ -117,6 +146,7 @@ class ModelConverterBase:
 
         converter = None
         column = None
+        type_guess = None
 
         if isinstance(prop, (ColumnProperty, Column)):
             if isinstance(prop, ColumnProperty):
@@ -170,8 +200,11 @@ class ModelConverterBase:
             kwargs["allow_blank"] = nullable
             
             if used_backend == BackendEnum.GINO:
-                pk_columns = list(mapper.primary_key.columns.items())
-                pk = pk_columns[0][1].name
+                # pk_columns = list(mapper.primary_key.columns.items())
+                try:
+                    pk = self.model_admin.pk_column.name
+                except Exception as e:
+                    pk = list(mapper.primary_key)[0].name
                 if isinstance(prop, RelationshipProperty):
                     stmt = select(get_related_model(prop))
                 else:
@@ -270,15 +303,17 @@ class ModelConverterBase:
                 if hasattr(prop, 'type'):
                     kwargs.pop("allow_blank", None)
                     kwargs.pop("object_list", None)
-                    converter = self.converters[type(prop.type).__name__]
+                    # converter = self.converters[type(prop.type).__name__]
+                    type_guess = prop.type
+                    converter = self.get_type_converter(type_guess)
             # elif isinstance(prop, QueryableAttribute):
-            if isinstance(prop, QueryableAttribute):
+            elif isinstance(prop, QueryableAttribute):
                 kwargs.pop("allow_blank", None)
                 kwargs.pop("object_list", None)
                 if hasattr(prop, 'descriptor'):
                     if prop.descriptor.__class__.__name__ == 'hybrid_property':
                         type_guess = getattr(prop.descriptor.fget, '__annotations__', {}).get('return', str)
-                        converter = self.converters[type_guess.__name__]
+                        converter = self.get_type_converter(type_guess)
             elif isinstance(prop, (RelationshipProperty, )):
                 if hasattr(prop, 'direction') and prop.direction is not None:
                     converter = self.converters[prop.direction.name]
@@ -288,9 +323,13 @@ class ModelConverterBase:
                 kwargs.pop("allow_blank", None)
                 kwargs.pop("object_list", None)
                 if hasattr(prop, 'class_') and prop.class_ is not None:
-                    converter = self.converters[prop.class_.__name__]
+                    # converter = self.converters[prop.class_.__name__]
+                    type_guess = prop.class_
+                    converter = self.get_type_converter(type_guess)
                 elif hasattr(prop, 'type'):
-                    converter = self.converters[type(prop.type).__name__]
+                    # converter = self.converters[type(prop.type).__name__]
+                    type_guess = prop.type
+                    converter = self.get_type_converter(type_guess)
                     
                 # else:
                 #     converter = self.converters['String']  # remove this!
@@ -298,13 +337,31 @@ class ModelConverterBase:
             print()
         assert converter is not None
 
-        convert_result = converter(
-            model=model, mapper=mapper, prop=prop, column=column, field_args=kwargs
-        )
-        
-        if iscoroutine(convert_result):
-            return await convert_result
-        return convert_result
+        try:
+            convert_result = converter(
+                model=model, 
+                mapper=mapper, 
+                prop=prop, 
+                column=column, 
+                field_args=kwargs,
+                type_guess=type_guess,
+            )
+            
+            if iscoroutine(convert_result):
+                return await convert_result
+            return convert_result
+        except Exception as e:
+            label = None
+            if prop is not None and hasattr(prop, "key"):
+                label = prop.key
+            elif column is not None and hasattr(column, "name"):
+                label = column.name
+            else:
+                label = "неопред. имя поля"
+            return StringField(
+                label=f"!!!{label}",
+                description=f"Ошибка:{str(e)}",
+            )
 
     def get_pk(self, o: Any, pk_name: str) -> Any:
         return getattr(o, pk_name)
@@ -350,10 +407,17 @@ class ModelConverter(ModelConverterBase):
     @converts("DateTime")
     def conv_DateTime(self, field_args: Dict, **kwargs: Any) -> Field:
         return DateTimeField(**field_args)
-
+        
     @converts("Enum")
-    def conv_Enum(self, column: Column, field_args: Dict, **kwargs: Any) -> Field:
-        field_args["choices"] = [(e, e) for e in column.type.enums]
+    def conv_Enum(self, column: Column, field_args: Dict, prop: Any, model: Any, type_guess: "Enum", **kwargs: Any) -> Field:
+        if column is None:
+            if type_guess is None:
+                field_args.pop("allow_blank", None)
+                field_args.pop("object_list", None)
+                return StringField(**field_args)
+            field_args["choices"] = [(e.value, e.name) for e in type_guess]
+        else:    
+            field_args["choices"] = [(e, e) for e in column.type.enums]
         return SelectField(**field_args)
     
     @converts("ChoiceType")
@@ -902,6 +966,7 @@ async def get_model_form(
     schema: PydanticBaseModel = None,
     extra_fields: Optional[Dict[str, Any]] = None,
     objects_getter: Optional[FunctionType] = None,
+    model_admin: Optional[type] = None,
 ) -> Type[Form]:
     type_name = model.__name__ + "Form"
     
@@ -912,7 +977,7 @@ async def get_model_form(
         fields: Iterable[PydanticModelField] = model.__fields__.values()
         attributes = [(name, attr) for name, attr in model.__fields__.items()]
     else:
-        converter = ModelConverter()
+        converter = ModelConverter(model_admin=model_admin)
         mapper = sqlalchemy_inspect(model)
 
         attributes = []

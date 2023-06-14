@@ -21,7 +21,7 @@ reform = "^0.2"
 [tool.poetry.dev-dependencies]
 gino = {extras = ["starlette"], version = "^1.0.1"}
 httpx = "^0.16.1"
-SQLAlchemy-Utils = "^0.36.8"
+SQLAlchemy-Utils = "~0.36"
 autoflake = "^1.4"
 black = "^22.1.0"
 coverage = "^6.3.1"
