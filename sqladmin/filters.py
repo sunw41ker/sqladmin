@@ -1,4 +1,5 @@
 from csv import DictReader
+from uuid import UUID, uuid4
 from functools import lru_cache
 from itertools import chain
 from types import FunctionType
@@ -6,9 +7,11 @@ from typing import ClassVar, Iterator, Tuple, Type, Union, Set
 from enum import Enum
 from typing import Any, Dict, Iterable, List, Optional, OrderedDict, Set, Union
 from urllib.parse import urlencode, quote_plus, parse_qs, parse_qsl
+from loguru import logger
 # from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import ColumnProperty, RelationshipProperty
 from sqlalchemy import Column
+import sqlalchemy as sa
 from sqlalchemy_utils.types import ChoiceType
 from sqladmin.backends.gino.models import find_model_class
 from sqladmin.forms import ModelConverter
@@ -44,7 +47,11 @@ class ClauseEnum(str, FunctionalEnum):
         return field == arg
 
     def _fn_ilike(self, field, arg: str):
-        return field.ilike(f'%{arg.strip()}%')
+        if isinstance(arg, str):
+            return field.ilike(f'%{arg.strip()}%')
+        
+        logger.warning(f"Non str ilike statement {arg=} for {field=}. Ignoring.")
+        return True  # sqlalchemy will ignore this arg in filter 
 
     def _fn_in(self, field, arg):
         return field.in_(arg)
@@ -343,9 +350,15 @@ class FilteredOrderedAdminColumn(BaseModelAdminColumn):
             yield self.sort.fn(self.field_prop, arg=None)
 
     def cast(self, value):
-        if self.field_prop.type.python_type != type(value):
+        is_convertable = False
+        try:
+            is_convertable = self.field_prop.type.python_type == type(value)
+        except Exception as e:
+            pass
+        
+        if is_convertable:
             return self.field_prop.type.python_type(value)
-        return value
+        return sa.func.cast(value, self.field_prop.type)
 
     def _cast_operands(self):
         self.where = [
@@ -836,6 +849,11 @@ class ModelAdminParamsMixin:
             data['operand'] = col_filter_item.operand
 
         items = []
+        items.append((
+            "",
+            "Очистить",
+            False,
+        ))
         active_items = []
         for cl in ClauseEnum:
             active = params.get_filter(model=model, field=field, clause=cl)
@@ -855,7 +873,6 @@ class ModelAdminParamsMixin:
                 self.get_col_filter_label(cl, col, model, field),
                 is_active
             ))
-
         # class FilterForm(Form):
         #     class Meta:
         #         is_active = is_filter_active
