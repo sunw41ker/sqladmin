@@ -88,12 +88,12 @@ class ModelAdminMeta(type):
 
         mapper = mcls._get_model_mapper(model)
 
-        pk_columns = list(mapper.primary_key)
-        cls.pk_column = None
-        if len(pk_columns) == 1 or kwargs.get("first_of_multiple", False):
-            cls.pk_column = pk_columns[0]
-        else:
-            cls.pk_column = attrs.get("pk_column")
+        cls.pk_column = attrs.get("pk_column")
+        if cls.pk_column is None:
+            pk_columns = list(mapper.primary_key)
+                
+            if len(pk_columns) == 1 or kwargs.get("first_of_multiple", False):
+                cls.pk_column = pk_columns[0]
             
         # if not kwargs.get("first_of_multiple", False):
         #     assert len(pk_columns) == 1, "Multiple PK columns not supported."
